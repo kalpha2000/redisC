@@ -2,7 +2,10 @@
 
 #include<iostream>
 #include<WinSock2.h>
+#include<assert.h>
+#include<string>
 
+const size_t k_max_msg = 4096;
 
 
 
@@ -17,17 +20,66 @@ static void msg(const char *msg) {
     fprintf(stderr, "%s\n", msg);
 }
 
-
-static void process(SOCKET connfd) {
-    char rbf[64] = "";
-    SSIZE_T n = recv(connfd, rbf, 64,0);
-    if(n<0) {
-        msg("read() error");
-        return;
+static int32_t read_full(int fd, char *buf, size_t n) {
+    // try to read n bytes but it may be we are not able to thus a loop, same with write
+    while (n > 0) {
+        SSIZE_T rv = recv(fd, buf, n, 0);
+        if (rv <= 0) {
+            return -1;  // error, or unexpected EOF
+        }
+        assert((size_t)rv <= n);
+        n -= (size_t)rv;
+        buf += rv;
     }
-    std::cout << stderr <<"client says: "<<rbf;
-    char wbf[] = "world";
-    send(connfd, wbf, strlen(wbf),0);
+    return 0;
+}
+
+static int32_t write_all(int fd, const char *buf, size_t n) {
+    while (n > 0) {
+        SSIZE_T rv = send(fd, buf, n, 0);
+        if (rv <= 0) {
+            return -1;  // error
+        }
+        assert((size_t)rv <= n);
+        n -= (size_t)rv;
+        buf += rv;
+    }
+    return 0;
+}
+
+static int32_t process(SOCKET connfd) {
+
+    // 4 bytes header
+    char rbuf[4 + k_max_msg];
+    errno = 0;
+    // reading length of message
+    int32_t err = read_full(connfd, rbuf, 4);
+    if (err) {
+        msg(errno == 0 ? "EOF" : "read() error");
+        return err;
+    }
+    uint32_t len = 0;
+    memcpy(&len, rbuf, 4);  // assume little endian
+    std::cout << len<<" ";
+    if (len > k_max_msg) {
+        msg("too long");
+        return -1;
+    }
+    // request body - reading message of length what we just read, rbug[4] as 1st 3 position if for space
+    err = read_full(connfd, &rbuf[4], len);
+    if (err) {
+        msg("read() error");
+        return err;
+    }
+    // do something
+    std::cout << "client says: " << std::string(&rbuf[4], len) << std::endl;
+    // reply using the same protocol
+    char reply[] = "world";
+    char wbuf[4 + sizeof(reply)];
+    len = (uint32_t)strlen(reply);
+    memcpy(wbuf, &len, 4);
+    memcpy(&wbuf[4], reply, len);
+    return write_all(connfd, wbuf, 4 + len);
 }
 int main() {
     // init winsock
@@ -74,7 +126,13 @@ int main() {
         if(connfd < 0) {
             continue; // error
         }
-        process(connfd);
+        // will serve only 1 connection at a time
+        while(true) {
+            int32_t err = process(connfd);
+            if(err < 0) {
+                break;
+            }
+        }
         closesocket(connfd);
     }
     closesocket(fd);
